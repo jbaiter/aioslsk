@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from ..constants import PATH_SEPERATOR_PATTERN
 from ..protocol.primitives import Attribute, FileData
@@ -63,7 +63,7 @@ def convert_item_to_file_data(
     )
 
 
-def convert_items_to_file_data(shared_items: list[SharedItem], use_full_path=True) -> list[FileData]:
+def convert_items_to_file_data(shared_items: Iterable[SharedItem], use_full_path=True) -> list[FileData]:
     """Converts a list of :class:`.SharedItem` instances to a list of
     :class:`.FileData` instances. If an exception occurs when converting the
     item an error will be logged and the item will be omitted from the list

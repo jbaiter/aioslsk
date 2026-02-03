@@ -447,7 +447,6 @@ class TestE2ETransfer:
 
     @pytest.mark.asyncio
     async def test_transfer_blockedUser(self, mock_server: MockServer, tmp_path: Path):
-
         client1, client2 = create_clients(tmp_path, amount=2)
 
         username1 = client1.settings.credentials.username
@@ -545,7 +544,8 @@ class TestE2ETransfer:
         client_1.network.set_download_speed_limit(50)
         client_2.network.set_upload_speed_limit(50)
 
-        directory = client_2.shares.shared_directories[0]
+        shared_directories = await client_2.shares.get_shared_directories()
+        directory = shared_directories[0]
 
         download = await self._search_and_download(client_1)
         upload = await wait_for_transfer_added(client_2, initial_amount=0)
@@ -554,7 +554,7 @@ class TestE2ETransfer:
         await wait_for_transfer_state(upload, TransferState.UPLOADING)
         await asyncio.sleep(0.25)
 
-        client_2.shares.update_shared_directory(
+        await client_2.shares.update_shared_directory(
             directory, share_mode=DirectoryShareMode.USERS)
 
         # Verify upload is aborted
@@ -567,7 +567,7 @@ class TestE2ETransfer:
         client_2.network.set_upload_speed_limit(0)
 
         # Reshare
-        client_2.shares.update_shared_directory(
+        await client_2.shares.update_shared_directory(
             directory, share_mode=DirectoryShareMode.EVERYONE)
 
         await wait_for_transfer_state(download, TransferState.COMPLETE)

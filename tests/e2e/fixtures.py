@@ -89,7 +89,8 @@ def create_clients(tmp_path: Path, amount: int) -> list[SoulSeekClient]:
     for idx in range(amount):
         username = 'user' + str(idx).zfill(3)
         port = 40000 + (idx * 10)
-        clients.append(create_client(tmp_path, username, port))
+        client = create_client(tmp_path, username, port)
+        clients.append(client)
 
     return clients
 

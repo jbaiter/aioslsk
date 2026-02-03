@@ -193,7 +193,7 @@ class SearchManager(BaseManager):
         if self._settings.users.is_blocked(username, BlockingFlag.SEARCHES):
             return
 
-        visible, locked = self._shares_manager.query(
+        visible, locked = await self._shares_manager.query(
             query,
             username=username,
             excluded_search_phrases=self.excluded_search_phrases

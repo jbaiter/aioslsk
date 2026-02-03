@@ -580,7 +580,7 @@ class TransferManager(BaseManager):
         tasks = []
         for upload in uploads:
 
-            should_change, abort_reason = self._evaluate_aborted_state(upload)
+            should_change, abort_reason = await self._evaluate_aborted_state(upload)
 
             if should_change:
                 if upload.state.VALUE == TransferState.ABORTED:
@@ -1539,7 +1539,7 @@ class TransferManager(BaseManager):
     def _request_shares_cycle(self, event):
         self.request_management_cycle(_RequestFlag.SHARES_CHANGE)
 
-    def _evaluate_aborted_state(self, upload: Transfer) -> tuple[bool, Optional[str]]:
+    async def _evaluate_aborted_state(self, upload: Transfer) -> tuple[bool, Optional[str]]:
         """Evaluates the aborted state of an upload to determine whether it:
 
         1. Should be requeued
@@ -1557,8 +1557,8 @@ class TransferManager(BaseManager):
         def _is_blocked(transfer: Transfer) -> bool:
             return self._settings.users.is_blocked(transfer.username, BlockingFlag.UPLOADS)
 
-        def _is_not_shared(transfer: Transfer) -> bool:
-            return not bool(self._shares_manager.find_shared_item_cache(
+        async def _is_not_shared(transfer: Transfer) -> bool:
+            return not bool(await self._shares_manager.find_shared_item_cache(
                 transfer.remote_path, transfer.username
             ))
 
@@ -1569,7 +1569,10 @@ class TransferManager(BaseManager):
         )
         abort_reason = None
         for condition, reason in conditions:
-            if condition(upload):
+            result = condition(upload)
+            if asyncio.iscoroutine(result):
+                result = await result
+            if result:
                 abort_reason = reason
                 break
 

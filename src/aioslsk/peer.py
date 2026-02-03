@@ -70,13 +70,7 @@ class PeerManager(BaseManager):
         if self._settings.users.is_blocked(connection.username, BlockingFlag.SHARES):
             return
 
-        visible, locked = self._shares_manager.create_shares_reply(connection.username)
-        await connection.send_message(
-            PeerSharesReply.Request(
-                directories=visible,
-                locked_directories=locked
-            )
-        )
+        await self._shares_manager.send_shares_reply(connection)
 
     @on_message(PeerSharesReply.Request)
     async def _on_peer_shares_reply(self, message: PeerSharesReply.Request, connection: PeerConnection):
@@ -114,7 +108,7 @@ class PeerManager(BaseManager):
         if self._settings.users.is_blocked(connection.username, BlockingFlag.SHARES):
             return
 
-        directories = self._shares_manager.create_directory_reply(message.directory)
+        directories = await self._shares_manager.create_directory_reply(message.directory)
         await connection.send_message(
             PeerDirectoryContentsReply.Request(
                 ticket=message.ticket,

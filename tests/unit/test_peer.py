@@ -140,7 +140,7 @@ class TestPeer:
         TICKET = 1324
 
         manager = self._create_peer_manager()
-        manager._shares_manager.create_directory_reply.return_value = DIRECTORY_DATA
+        manager._shares_manager.create_directory_reply = AsyncMock(return_value=DIRECTORY_DATA)
 
         connection = AsyncMock()
         connection.username = USER
