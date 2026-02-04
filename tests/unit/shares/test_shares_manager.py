@@ -69,9 +69,9 @@ SETTINGS_SUBDIR_USERS = Settings(**{
 
 SHARED_DIRECTORY = SharedDirectory('music', 'C:\\music', 'abcdef')
 SHARED_ITEMS = {
-    'item1': SharedItem(SHARED_DIRECTORY, 'folk\\folkalbum, release\\', 'simple band(contrib. singer) - isn\'t easy song.mp3', 0.0),
-    'item2': SharedItem(SHARED_DIRECTORY, 'metal\\metalalbum release\\', 'simple band (contrib. singer)_-_don\'t easy song 片仮名.flac', 0.0),
-    'item3': SharedItem(SHARED_DIRECTORY, 'rap\\rapalbum_release\\', 'simple_band(contributer. singer)-don\'t_easy_song 片仮名.mp3', 0.0),
+    'item1': SharedItem(SHARED_DIRECTORY, 'folk\\folkalbum, release\\', 'simple band(contrib. singer) - isn\'t easy song.mp3', 0.0, 0),
+    'item2': SharedItem(SHARED_DIRECTORY, 'metal\\metalalbum release\\', 'simple band (contrib. singer)_-_don\'t easy song 片仮名.flac', 0.0, 0),
+    'item3': SharedItem(SHARED_DIRECTORY, 'rap\\rapalbum_release\\', 'simple_band(contributer. singer)-don\'t_easy_song 片仮名.mp3', 0.0, 0),
 }
 SHARED_DIRECTORY.items = set(SHARED_ITEMS.values())
 
@@ -128,7 +128,7 @@ class TestSharedDirectory:
 
     def test_getItemByRemotePath_itemExists_shouldReturnItem(self):
         shared_directory = SharedDirectory('music', r"C:\\music", 'abcdef')
-        item = SharedItem(shared_directory, 'author', 'song.mp3', 1.0)
+        item = SharedItem(shared_directory, 'author', 'song.mp3', 1.0, 1000)
         shared_directory.items = {item}
 
         remote_path = '@@abcdef\\author\\song.mp3'
@@ -136,7 +136,7 @@ class TestSharedDirectory:
 
     def test_getItemByRemotePath_itemNotExists_shouldRaise(self):
         shared_directory = SharedDirectory('music', r"C:\\music", 'abcdef')
-        item = SharedItem(shared_directory, 'author', 'song.mp3', 1.0)
+        item = SharedItem(shared_directory, 'author', 'song.mp3', 1.0, 1000)
         shared_directory.items = {item}
 
         remote_path = '@@abcdef\\author\\song2.mp3'

@@ -1531,7 +1531,7 @@ class TransferManager(BaseManager):
 
         transfer = Transfer(username, remote_path, direction=TransferDirection.UPLOAD)
         transfer.local_path = shared_item.get_absolute_path()
-        transfer.filesize = await self._shares_manager.get_filesize(shared_item)
+        transfer.filesize = shared_item.size_bytes
 
         await self.add(transfer)
         return transfer

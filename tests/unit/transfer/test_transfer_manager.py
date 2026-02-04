@@ -810,5 +810,6 @@ class TestTransferManager:
             shared_directory=shared_directory,
             subdir=file_subdir,
             filename=DEFAULT_FILENAME,
-            modified=1.0
+            modified=1.0,
+            size_bytes=1024
         )

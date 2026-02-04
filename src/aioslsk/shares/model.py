@@ -83,12 +83,23 @@ class SharedItem:
     subdir: str
     filename: str
     modified: float
+    size_bytes: int
     attributes: Optional[list[tuple[int, int]]] = field(
         default=None,
         init=False,
         compare=False,
         hash=False
     )
+
+    def __setstate__(self, state: dict):
+        # Backwards compatibility for unpickling from versions when size_bytes
+        # was not stored. `shared_directory` is set to None during pickling,
+        # so we can't compute size_bytes from the filesystem at this point. Instead,
+        # we set it to -1 here and let the SharesCache populate it with the correct value
+        # when loading the cache once the shared_directory is known.
+        if 'size_bytes' not in state:
+            state['size_bytes'] = -1
+        self.__dict__.update(state)
 
     def get_absolute_path(self) -> str:
         """Returns the absolute path of the shared item"""

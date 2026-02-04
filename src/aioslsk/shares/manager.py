@@ -9,7 +9,6 @@ import logging
 import mutagen
 from mutagen.mp3 import BitrateMode
 import os
-import queue
 import sys
 import time
 from typing import Optional, Union, TYPE_CHECKING
@@ -103,7 +102,7 @@ async def scan_directory(
         for filename, stat in zip(files, stats):
             if stat is not None:
                 shared_items.add(
-                    SharedItem(shared_directory, subdir, filename, stat.st_mtime)
+                    SharedItem(shared_directory, subdir, filename, stat.st_mtime, stat.st_size)
                 )
 
     return shared_items
@@ -622,9 +621,6 @@ class SharesManager(BaseManager):
         )
 
         await self.report_shares()
-
-    async def get_filesize(self, shared_item: SharedItem) -> int:
-        return await asyncos.path.getsize(shared_item.get_absolute_path())
 
     async def query(
             self, query: Union[str, SearchQuery],

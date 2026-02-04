@@ -44,10 +44,7 @@ def convert_item_to_file_data(
         ``True`` otherwise use just the filename. Should be ``False`` when
         generating a shares reply, ``True`` when generating search reply
     :return: the converted data
-    :raise OSError: raised when an error occurred accessing the file
     """
-    file_path = shared_item.get_absolute_path()
-    file_size = os.path.getsize(file_path)
     file_ext = os.path.splitext(shared_item.filename)[-1][1:]
     if shared_item.attributes:
         attributes = [Attribute(*attr) for attr in shared_item.attributes]
@@ -57,7 +54,7 @@ def convert_item_to_file_data(
     return FileData(
         unknown=1,
         filename=shared_item.get_remote_path() if use_full_path else shared_item.filename,
-        filesize=file_size,
+        filesize=shared_item.size_bytes,
         extension=file_ext,
         attributes=attributes
     )
