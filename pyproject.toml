@@ -8,6 +8,10 @@ documentation = "https://readthedocs.org/projects/aioslsk/"
 readme = "README.rst"
 license = "GPL-3.0-or-later"
 packages = [{include = "aioslsk", from = "src"}]
+include = [
+    "src/aioslsk/database/migrations/*.sql",
+    "src/aioslsk/database/migrations/*.py",
+]
 keywords = ["soulseek", "p2p", "async"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,6 +34,7 @@ async-timeout = ">=4.0.3,<6.0.0"
 typing-extensions = "^4.12.2"
 multidict = "^6.0.5"
 pydantic = "^2.12.0"
+aiosqlite = ">=0.20,<1.0"
 
 [tool.poetry.group.dev.dependencies]
 flake8 = { version = ">=6,<8", python = ">=3.10,<3.15" }
@@ -55,6 +60,11 @@ yappi = "^1.4.0"
 log_cli_level = "DEBUG"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+filterwarnings = [
+    # Ignore fork() warnings when using ProcessPoolExecutor with aiosqlite threads
+    # This is expected when testing ProcessPoolExecutor variants alongside SQLite tests
+    "ignore:This process.*is multi-threaded, use of fork\\(\\) may lead to deadlocks:DeprecationWarning"
+]
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
