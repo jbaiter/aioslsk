@@ -932,19 +932,25 @@ class PeerGetDirectoryContentCommand(BaseCommand[PeerDirectoryContentsReply.Requ
         self.directory: str = directory
         self._ticket: Optional[int] = None
 
+    def _ensure_ticket(self, client: SoulSeekClient) -> int:
+        if self._ticket is None:
+            self._ticket = next(client.ticket_generator)
+        return self._ticket
+
     async def send(self, client: SoulSeekClient):
-        self._ticket = next(client.ticket_generator)
+        ticket = self._ensure_ticket(client)
         await client.network.send_peer_messages(
-            self.username, PeerDirectoryContentsRequest.Request(self._ticket, self.directory)
+            self.username, PeerDirectoryContentsRequest.Request(ticket, self.directory)
         )
 
     def build_expected_response(self, client: SoulSeekClient) -> Optional[ExpectedResponse]:
+        ticket = self._ensure_ticket(client)
         return ExpectedResponse(
             PeerConnection,
             PeerDirectoryContentsReply.Request,
             peer=self.username,
             fields={
-                'ticket': self._ticket,
+                'ticket': ticket,
                 'directory': self.directory
             }
         )

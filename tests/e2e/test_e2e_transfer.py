@@ -10,13 +10,7 @@ from aioslsk.transfer.model import (
 )
 from aioslsk.user.model import BlockingFlag
 from .mock.server import MockServer
-from .fixtures import (
-    mock_server,
-    client_1,
-    client_2,
-    create_clients,
-    client_start_and_scan,
-)
+from .fixtures import create_clients, client_start_and_scan
 from .utils import (
     wait_for_remotely_queued_state,
     wait_for_search_results,
@@ -39,7 +33,9 @@ logger = logging.getLogger(__name__)
 class TestE2ETransfer:
 
     @pytest.mark.asyncio
-    async def test_transfer_happyFlow(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_happyFlow(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Happy path for performing a transfer"""
         await wait_until_clients_initialized(mock_server, amount=2)
         client_1.network.set_download_speed_limit(100)
@@ -104,7 +100,9 @@ class TestE2ETransfer:
         assert uploader_progress_listener.await_count > 0
 
     @pytest.mark.asyncio
-    async def test_transfer_queueCompleteDownload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_queueCompleteDownload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Requeue a completed download"""
         await wait_until_clients_initialized(mock_server, amount=2)
         client_1.network.set_download_speed_limit(150)
@@ -149,7 +147,9 @@ class TestE2ETransfer:
         assert filecmp.cmp(download.local_path, upload.local_path)
 
     @pytest.mark.asyncio
-    async def test_transfer_retryAfterDisconnect(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_retryAfterDisconnect(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests retrying the download after the connection got disconnected"""
         await wait_until_clients_initialized(mock_server, amount=2)
 
@@ -175,7 +175,9 @@ class TestE2ETransfer:
         await wait_for_transfer_state(upload, TransferState.COMPLETE)
 
     @pytest.mark.asyncio
-    async def test_transfer_pauseAndResumeDownload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_pauseAndResumeDownload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests pausing and resuming a download"""
         await wait_until_clients_initialized(mock_server, amount=2)
         client_1.network.set_download_speed_limit(50)
@@ -201,7 +203,9 @@ class TestE2ETransfer:
         await wait_for_transfer_state(upload, TransferState.COMPLETE)
 
     @pytest.mark.asyncio
-    async def test_transfer_pauseAndResumeUpload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_pauseAndResumeUpload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests pausing and resuming a download"""
         await wait_until_clients_initialized(mock_server, amount=2)
         client_1.network.set_download_speed_limit(50)
@@ -227,7 +231,9 @@ class TestE2ETransfer:
         await wait_for_transfer_state(upload, TransferState.COMPLETE)
 
     @pytest.mark.asyncio
-    async def test_transfer_abortDownload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_abortDownload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests aborting a download
 
         The download should end up in ABORTED state
@@ -262,7 +268,9 @@ class TestE2ETransfer:
         assert os.path.exists(upload.local_path) is True
 
     @pytest.mark.asyncio
-    async def test_transfer_queueAbortedDownload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_queueAbortedDownload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests re-queueing an aborted download
 
         The download should end up in COMPLETE state
@@ -311,7 +319,9 @@ class TestE2ETransfer:
         assert filecmp.cmp(download.local_path, upload.local_path)
 
     @pytest.mark.asyncio
-    async def test_transfer_abortUpload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_abortUpload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests aborting an upload.
 
         The download should end up in FAILED state
@@ -340,7 +350,9 @@ class TestE2ETransfer:
         assert os.path.exists(upload.local_path) is True
 
     @pytest.mark.asyncio
-    async def test_transfer_queueAbortedUpload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_queueAbortedUpload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests queueing an aborted upload
 
         The download should end up in COMPLETE state
@@ -382,7 +394,9 @@ class TestE2ETransfer:
         assert filecmp.cmp(download.local_path, upload.local_path)
 
     @pytest.mark.asyncio
-    async def test_transfer_removeDownload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_removeDownload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests removing a download
 
         The download should end up in ABORTED state (and be removed afterwards)
@@ -446,8 +460,9 @@ class TestE2ETransfer:
         await wait_for_transfer_state(upload, TransferState.COMPLETE)
 
     @pytest.mark.asyncio
-    async def test_transfer_blockedUser(self, mock_server: MockServer, tmp_path: Path):
-        client1, client2 = create_clients(tmp_path, amount=2)
+    async def test_transfer_blockedUser(self, mock_server: MockServer, tmp_path: Path, shares_backend: str):
+        use_sqlite = shares_backend == "sqlite"
+        client1, client2 = await create_clients(tmp_path, amount=2, use_sqlite=use_sqlite)
 
         username1 = client1.settings.credentials.username
 
@@ -470,7 +485,9 @@ class TestE2ETransfer:
             await client2.stop()
 
     @pytest.mark.asyncio
-    async def test_transfer_blockDuringDownload(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_blockDuringDownload(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests blocking a downloading user
 
         The download should end up in FAILED state
@@ -497,7 +514,9 @@ class TestE2ETransfer:
             upload, TransferState.ABORTED, abort_reason=AbortReason.BLOCKED)
 
     @pytest.mark.asyncio
-    async def test_transfer_unblockDownloadingUser(self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient):
+    async def test_transfer_unblockDownloadingUser(
+        self, mock_server: MockServer, client_1: SoulSeekClient, client_2: SoulSeekClient
+    ):
         """Tests unblocking a user
 
         The download should end up in COMPLETE state

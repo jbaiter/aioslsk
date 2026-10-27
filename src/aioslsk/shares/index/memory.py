@@ -37,6 +37,7 @@ class MemoryShareIndex(ShareIndex):
     _prebake_dir: Path | None
     _prebaked_listings: dict[DirectoryShareMode, bytes] | None
     _scan_seen_items: dict[str, set[SharedItem]]
+    _scan_cached_items: dict[str, dict[SharedItem, SharedItem]]
 
     def __init__(
         self,
@@ -51,12 +52,14 @@ class MemoryShareIndex(ShareIndex):
         self._prebake_dir = prebake_dir
         self._prebaked_listings = None
         self._scan_seen_items = {}
+        self._scan_cached_items = {}
         self.cache = cache
 
     async def add_shared_directory(
         self,
         shared_directory: SharedDirectory,
     ) -> None:
+        await self.invalidate_prebaked_listings()
         # Update if already exists, otherwise add
         existing = await self.get_shared_directory(shared_directory.absolute_path)
         if existing is not None:
@@ -116,7 +119,7 @@ class MemoryShareIndex(ShareIndex):
     ) -> None:
         if shared_directory not in self._shared_directories:
             raise SharedDirectoryError("attempted to update unknown shared directory")
-        # No-op for memory index
+        await self.invalidate_prebaked_listings()
 
     async def delete_shared_directory(
         self, directory: str | SharedDirectory
@@ -160,6 +163,7 @@ class MemoryShareIndex(ShareIndex):
                 "attempted to remove directory which was not added to the manager"
             )
 
+        await self.invalidate_prebaked_listings()
         self._shared_directories.remove(shared_directory)
 
         parents = self._get_parent_directories(shared_directory)
@@ -384,6 +388,12 @@ class MemoryShareIndex(ShareIndex):
         else:
             return list(found_items), []
 
+    async def invalidate_prebaked_listings(self) -> None:
+        self._prebaked_listings = None
+        if self._prebake_dir is not None:
+            for mode in DirectoryShareMode:
+                (self._prebake_dir / f"{mode.name.lower()}.bin").unlink(missing_ok=True)
+
     async def save_prebaked_listing(
         self,
         mode: DirectoryShareMode,
@@ -592,14 +602,15 @@ class MemoryShareIndex(ShareIndex):
         return sorted(parent_dirs, key=lambda d: len(d.absolute_path))
 
     async def update_item_attributes(self, items: list[SharedItem]) -> None:
-        # In-memory index: items are mutable, attributes are already set
-        pass
-
-    async def begin_scan(self) -> None:
-        self._scan_seen_items = {}
+        # In-memory index: items are mutable, attributes are already set.
+        if items:
+            await self.invalidate_prebaked_listings()
 
     async def begin_directory_scan(self, shared_directory: SharedDirectory) -> None:
         self._scan_seen_items[shared_directory.absolute_path] = set()
+        self._scan_cached_items[shared_directory.absolute_path] = {
+            item: item for item in shared_directory.items
+        }
 
     async def persist_scanned_items_batch(
         self,
@@ -608,6 +619,11 @@ class MemoryShareIndex(ShareIndex):
     ) -> None:
         if not items:
             return
+        cached = self._scan_cached_items.get(shared_directory.absolute_path, {})
+        for item in items:
+            previous = cached.get(item)
+            if item.attributes is None and previous is not None and previous.attributes is not None:
+                item.attributes = previous.attributes.copy()
         seen = self._scan_seen_items.setdefault(shared_directory.absolute_path, set())
         seen.update(items)
 
@@ -617,12 +633,38 @@ class MemoryShareIndex(ShareIndex):
 
     async def end_directory_scan(self, shared_directory: SharedDirectory) -> None:
         seen_items = self._scan_seen_items.pop(shared_directory.absolute_path, set())
+        cached = self._scan_cached_items.pop(shared_directory.absolute_path, {})
+        if not any(directory is shared_directory for directory in self._shared_directories):
+            return
 
-        # Adds all new items to the directory items
+        children = [
+            directory for directory in self._shared_directories
+            if directory is not shared_directory and directory.is_child_of(shared_directory)
+        ]
+        seen_items = {
+            item for item in seen_items
+            if not any(child.is_parent_of(item.get_absolute_path()) for child in children)
+        }
+        for item in seen_items:
+            previous = cached.get(item)
+            if previous is not None:
+                # Equal items retain their original identity in sets/term maps.
+                previous.attributes = item.attributes
+        await self.invalidate_prebaked_listings()
+        removed = shared_directory.items - seen_items
+        for item in removed:
+            path = (item.subdir + "\\" + item.filename).lower()
+            for term in re.split(_QUERY_CLEAN_PATTERN, path):
+                if term in self._term_map:
+                    self._term_map[term].discard(item)
+        shared_directory.items -= removed
         shared_directory.items |= seen_items
+        self.build_term_map(shared_directory)
+        self.cleanup_term_map()
 
-        # Remove all items from the cache that weren't in the returned items set.
-        shared_directory.items -= (shared_directory.items ^ seen_items)
+    async def abort_directory_scan(self, shared_directory: SharedDirectory) -> None:
+        self._scan_seen_items.pop(shared_directory.absolute_path, None)
+        self._scan_cached_items.pop(shared_directory.absolute_path, None)
 
     async def load_data(self) -> None:
         self.read_cache()
@@ -631,6 +673,7 @@ class MemoryShareIndex(ShareIndex):
         self.write_cache()
 
     async def on_settings_loaded(self) -> None:
+        await self.invalidate_prebaked_listings()
         self.rebuild_term_map()
 
     async def persist_scanned_directory(self, shared_directory: SharedDirectory) -> None:
@@ -640,8 +683,3 @@ class MemoryShareIndex(ShareIndex):
 
     async def finalize_scan(self, updated_items: list[SharedItem]) -> None:
         self.rebuild_term_map()
-
-    async def end_scan(self) -> None:
-        self._scan_seen_items = {}
-
-

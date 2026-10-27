@@ -64,7 +64,7 @@ class Serializable(Protocol):
     def serialize(self, *args, **kwargs) -> bytes:
         ...
 
-    def serialize_into(self, buffer: bytearray, *args, **kwargs):
+    def serialize_into(self, buffer: bytearray, *args, **kwargs) -> None:
         ...
 
 
@@ -89,7 +89,7 @@ class uint8(int):
     def serialize(self) -> bytes:
         return self.STRUCT.pack(self)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         buffer.extend(self.STRUCT.pack(self))
 
     @classmethod
@@ -103,7 +103,7 @@ class uint16(int):
     def serialize(self) -> bytes:
         return self.STRUCT.pack(self)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         buffer.extend(self.STRUCT.pack(self))
 
     @classmethod
@@ -117,7 +117,7 @@ class uint32(int):
     def serialize(self) -> bytes:
         return self.STRUCT.pack(self)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         buffer.extend(self.STRUCT.pack(self))
 
     @classmethod
@@ -131,7 +131,7 @@ class uint64(int):
     def serialize(self) -> bytes:
         return self.STRUCT.pack(self)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         buffer.extend(self.STRUCT.pack(self))
 
     @classmethod
@@ -145,7 +145,7 @@ class int32(int):
     def serialize(self) -> bytes:
         return self.STRUCT.pack(self)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         buffer.extend(self.STRUCT.pack(self))
 
     @classmethod
@@ -160,7 +160,7 @@ class string(str):
 
         return uint32(len(byte_string)).serialize() + byte_string
 
-    def serialize_into(self, buffer: bytearray, encoding: str = 'utf-8'):
+    def serialize_into(self, buffer: bytearray, encoding: str = 'utf-8') -> None:
         byte_string = self.encode(encoding)
         uint32(len(byte_string)).serialize_into(buffer)
         buffer.extend(byte_string)
@@ -186,7 +186,7 @@ class bytearr(bytes):
         length = len(self)
         return uint32(length).serialize() + bytes(self)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         uint32(len(self)).serialize_into(buffer)
         buffer.extend(self)
 
@@ -204,7 +204,7 @@ class ipaddr(str):
         ip_b = socket.inet_aton(self)
         return self.STRUCT.pack(bytes(reversed(ip_b)))
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         ip_b = socket.inet_aton(self)
         buffer.extend(reversed(ip_b))
 
@@ -221,7 +221,7 @@ class boolean(int):
     def serialize(self) -> bytes:
         return self.STRUCT.pack(self)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         buffer.extend(self.STRUCT.pack(self))
 
     @classmethod
@@ -236,14 +236,23 @@ class array(list):
         self.serialize_into(buffer, element_type)
         return bytes(buffer)
 
-    def serialize_into(self, buffer: bytearray, element_type: type[Serializable]):
+    def serialize_into(self, buffer: bytearray, element_type: type[Serializable]) -> None:
         uint32(len(self)).serialize_into(buffer)
         if is_dataclass(element_type):
             for value in self:
-                value.serialize_into(buffer)
+                serialize_into = getattr(value, "serialize_into", None)
+                if serialize_into is not None:
+                    serialize_into(buffer)
+                else:
+                    buffer.extend(value.serialize())
         else:
             for value in self:
-                element_type(value).serialize_into(buffer)
+                obj = element_type(value)
+                serialize_into = getattr(obj, "serialize_into", None)
+                if serialize_into is not None:
+                    serialize_into(buffer)
+                else:
+                    buffer.extend(obj.serialize())
 
     @classmethod
     def deserialize(cls, pos: int, data: bytes, element_type: type[T]) -> tuple[int, list[T]]:
@@ -281,7 +290,7 @@ class ProtocolDataclass:
         self.serialize_into(buffer)
         return bytes(buffer)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         if self.__class__._CACHED_FIELDS is None:
             # Ignoring the typing error because the intent of the class is to
             # be inherited from by a class that is a dataclass. A check could
@@ -301,11 +310,25 @@ class ProtocolDataclass:
                 raise Exception(f"no 'type' for field {obj_field.name!r} defined")
 
             if is_dataclass(proto_type):
-                value.serialize_into(buffer)
+                serialize_into = getattr(value, "serialize_into", None)
+                if serialize_into is not None:
+                    serialize_into(buffer)
+                else:
+                    buffer.extend(value.serialize())
             elif 'subtype' in obj_field.metadata:
-                proto_type(value).serialize_into(buffer, obj_field.metadata['subtype'])
+                obj = proto_type(value)
+                serialize_into = getattr(obj, "serialize_into", None)
+                if serialize_into is not None:
+                    serialize_into(buffer, obj_field.metadata['subtype'])
+                else:
+                    buffer.extend(obj.serialize(obj_field.metadata['subtype']))
             else:
-                proto_type(value).serialize_into(buffer)
+                obj = proto_type(value)
+                serialize_into = getattr(obj, "serialize_into", None)
+                if serialize_into is not None:
+                    serialize_into(buffer)
+                else:
+                    buffer.extend(obj.serialize())
 
     @classmethod
     def deserialize(cls, pos: int, message: bytes):
@@ -396,7 +419,7 @@ class MessageDataclass(ProtocolDataclass):
         self.serialize_into(buffer, compress=compress)
         return bytes(buffer)
 
-    def serialize_into(self, buffer: bytearray, compress: bool = False):
+    def serialize_into(self, buffer: bytearray, compress: bool = False) -> None:
         message_id = self.MESSAGE_ID.serialize()
 
         message = bytearray()
@@ -464,7 +487,7 @@ class Attribute(ProtocolDataclass):
     def serialize(self) -> bytes:
         return _ATTR_STRUCT.pack(self.key, self.value)
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         buffer.extend(_ATTR_STRUCT.pack(self.key, self.value))
 
 
@@ -535,7 +558,7 @@ class FileData(ProtocolDataclass):
             array(self.attributes).serialize(Attribute)
         )
 
-    def serialize_into(self, buffer: bytearray):
+    def serialize_into(self, buffer: bytearray) -> None:
         uint8(self.unknown).serialize_into(buffer)
         string(self.filename).serialize_into(buffer)
         uint64(self.filesize).serialize_into(buffer)
@@ -569,6 +592,10 @@ class DirectoryData(ProtocolDataclass):
 
     def serialize(self) -> bytes:
         return string(self.name).serialize() + array(self.files).serialize(FileData)
+
+    def serialize_into(self, buffer: bytearray) -> None:
+        string(self.name).serialize_into(buffer)
+        array(self.files).serialize_into(buffer, FileData)
 
 
 def has_unparsed_bytes(pos: int, message: bytes) -> bool:

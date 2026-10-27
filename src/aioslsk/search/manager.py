@@ -223,17 +223,24 @@ class SearchManager(BaseManager):
             len(visible), len(locked), query, username
         )
 
+        # Match Nicotine+: sort each already-capped list by full remote path.
+        # Keep backend selection and incoming-result ordering unchanged.
+        visible_results = convert_items_to_file_data(visible, use_full_path=True)
+        locked_results = convert_items_to_file_data(locked, use_full_path=True)
+        visible_results.sort(key=lambda item: item.filename)
+        locked_results.sort(key=lambda item: item.filename)
+
         task = asyncio.create_task(
             self._network.send_peer_messages(
                 username,
                 PeerSearchReply.Request(
                     username=self._session.user.name,
                     ticket=ticket,
-                    results=convert_items_to_file_data(visible, use_full_path=True),
+                    results=visible_results,
                     has_slots_free=self._upload_info_provider.has_slots_free(),
                     avg_speed=int(self._upload_info_provider.get_average_upload_speed()),
                     queue_size=self._upload_info_provider.get_queue_size(),
-                    locked_results=convert_items_to_file_data(locked, use_full_path=True)
+                    locked_results=locked_results
                 )
             ),
             name=f'search-reply-{task_counter()}'

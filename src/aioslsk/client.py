@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 from async_timeout import timeout as atimeout
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from .base_manager import BaseManager
 from .commands import BaseCommand, RC, RT
@@ -35,6 +35,9 @@ from .transfer.manager import TransferManager
 from .user.manager import UserManager
 from .utils import ticket_generator
 
+if TYPE_CHECKING:
+    from .database.sqlite import SQLiteDatabase
+
 
 CLIENT_VERSION = 157
 MINOR_VERSION = 100
@@ -53,9 +56,11 @@ class SoulSeekClient:
             self, settings: Settings,
             shares_cache: Optional[SharesCache] = None, transfer_cache: Optional[TransferCache] = None,
             executor_factory: Optional[ExecutorFactory] = None,
-            event_bus: Optional[EventBus] = None):
+            event_bus: Optional[EventBus] = None,
+            database: Optional["SQLiteDatabase"] = None):
 
         self.settings: Settings = settings
+        self._database: Optional["SQLiteDatabase"] = database
 
         self._stop_event: Optional[asyncio.Event] = None
 
@@ -114,6 +119,9 @@ class SoulSeekClient:
 
         :param connect: Whether to connect the network after start up
         """
+        if self._database:
+            await self._database.connect()
+
         self.get_event_loop().set_exception_handler(self._exception_handler)
 
         # Allows creating client before actually calling asyncio.run(client.start())
@@ -154,6 +162,8 @@ class SoulSeekClient:
 
         await asyncio.gather(*cancelled_tasks, return_exceptions=True)
         await asyncio.gather(*[svc.store_data() for svc in self.services])
+        if self._database:
+            await self._database.close()
 
     async def connect(self):
         """Initializes the network by connecting to the server and opening the
@@ -319,7 +329,8 @@ class SoulSeekClient:
             self.events,
             self.network,
             cache=cache,
-            executor_factory=executor_factory
+            executor_factory=executor_factory,
+            database=self._database
         )
 
     def create_transfer_manager(self, cache: TransferCache) -> TransferManager:

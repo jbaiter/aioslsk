@@ -1,5 +1,4 @@
 from __future__ import annotations
-import logging
 import os
 import re
 from typing import TYPE_CHECKING, Iterable
@@ -9,9 +8,6 @@ from ..protocol.primitives import Attribute, FileData
 
 if TYPE_CHECKING:
     from .model import SharedItem
-
-
-logger = logging.getLogger(__name__)
 
 
 def normalize_remote_path(path: str) -> str:
@@ -62,16 +58,9 @@ def convert_item_to_file_data(
 
 def convert_items_to_file_data(shared_items: Iterable[SharedItem], use_full_path=True) -> list[FileData]:
     """Converts a list of :class:`.SharedItem` instances to a list of
-    :class:`.FileData` instances. If an exception occurs when converting the
-    item an error will be logged and the item will be omitted from the list
+    :class:`.FileData` instances.
     """
-    file_datas = []
-    for shared_item in shared_items:
-        try:
-            file_datas.append(
-                convert_item_to_file_data(shared_item, use_full_path=use_full_path)
-            )
-        except OSError:
-            logger.warning("failed to convert to result : %r", shared_item)
-
-    return file_datas
+    return [
+        convert_item_to_file_data(item, use_full_path=use_full_path)
+        for item in shared_items
+    ]

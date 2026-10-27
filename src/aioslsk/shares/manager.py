@@ -1,23 +1,22 @@
-import itertools
-from pathlib import Path
-from aiofiles import os as asyncos
 import asyncio
-from collections.abc import Callable
-from concurrent.futures import Executor
+from collections.abc import AsyncIterator, Callable
+from concurrent.futures import Executor, TimeoutError as FutureTimeoutError
 from functools import partial
 import logging
 import mutagen
 from mutagen.mp3 import BitrateMode
 import os
 import sys
+import threading
 import time
 from typing import Optional, Union, TYPE_CHECKING
 import uuid
 
-from aioslsk.shares.index import MemoryShareIndex
+from aiofiles import os as asyncos
+from aioslsk.shares.index import MemoryShareIndex, ShareIndex, SQLiteShareIndex
 
 from ..base_manager import BaseManager
-from .cache import SharesCache, SharesShelveCache
+from .cache import SharesCache
 from ..events import (
     EventBus,
     ScanCompleteEvent,
@@ -44,12 +43,16 @@ from ..session import Session
 from ..settings import Settings
 
 if TYPE_CHECKING:
+    from aioslsk.database.sqlite import SQLiteDatabase
     from ..network.connection import PeerConnection
 
 logger = logging.getLogger(__name__)
 
 ItemAttributes = list[tuple[int, int]]
 ExecutorFactory = Callable[[], Executor]
+SCAN_STAT_CONCURRENCY = 64
+SCAN_FILE_BATCH_SIZE = 500
+SCAN_DIRECTORIES_IN_FLIGHT = 2
 
 _COMPRESSED_FORMATS = [
     'MP3',
@@ -63,48 +66,109 @@ _LOSSLESS_FORMATS = [
 ]
 
 
-async def scan_directory(
-        shared_directory: SharedDirectory,
-        children: Optional[list[SharedDirectory]] = None,
-        stat_concurrency: int = 64) -> set[SharedItem]:
-    """Scans the directory for items to share with parallel stat calls.
+async def iter_scanned_item_batches(
+    shared_directory: SharedDirectory,
+    children: Optional[list[SharedDirectory]] = None,
+    stat_concurrency: int = SCAN_STAT_CONCURRENCY,
+    batch_size: int = SCAN_FILE_BATCH_SIZE,
+) -> AsyncIterator[list[SharedItem]]:
+    """Yield scanned shared items in bounded-size batches.
 
     :param shared_directory: :class:`.SharedDirectory` instance
     :param children: list of :class:`.SharedDirectory` instances, the items in
         this list will not be returned and should be scanned individually
-    :param stat_concurrency: max concurrent stat calls per directory (default 64)
-    :return: set of :class:`.SharedItem` objects found during the scan
+    :param stat_concurrency: retained for compatibility; stats now run in the
+        walker thread rather than scheduling a task for each file
+    :param batch_size: max files to process and emit per batch
+    :yield: batch of :class:`.SharedItem` objects found during the scan
     """
     children = children or []
-    shared_items: set[SharedItem] = set()
-    semaphore = asyncio.Semaphore(stat_concurrency)
 
-    async def stat_file(filepath: str) -> os.stat_result | None:
-        async with semaphore:
+    # Walk and stat in the same worker, keeping both blocking filesystem calls
+    # and per-file executor dispatch off the event loop. The queue bounds prefetch.
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[list[SharedItem] | BaseException | None] = asyncio.Queue(maxsize=8)
+    stop_event = threading.Event()
+
+    def _put_from_thread(msg: list[SharedItem] | BaseException | None) -> bool:
+        if stop_event.is_set():
+            return False
+        try:
+            put_future = asyncio.run_coroutine_threadsafe(queue.put(msg), loop)
+        except RuntimeError:
+            return False
+
+        while True:
             try:
-                return await asyncio.to_thread(os.stat, filepath)
-            except OSError:
-                logger.debug("could not stat file: %r", filepath)
-                return None
+                put_future.result(timeout=0.2)
+                return True
+            except FutureTimeoutError:
+                if stop_event.is_set():
+                    put_future.cancel()
+                    return False
 
-    for directory, _, files in os.walk(shared_directory.absolute_path):
-        abs_dir = os.path.normpath(os.path.abspath(directory))
-        if any(child_dir.is_parent_of(abs_dir) for child_dir in children):
-            continue
+    def _walk_in_thread() -> None:
+        try:
+            for directory, _, files in os.walk(shared_directory.absolute_path):
+                abs_dir = os.path.normpath(os.path.abspath(directory))
+                if any(child_dir.is_parent_of(abs_dir) for child_dir in children):
+                    continue
 
-        subdir = os.path.relpath(directory, shared_directory.absolute_path)
-        if subdir == '.':
-            subdir = ''
+                subdir = os.path.relpath(directory, shared_directory.absolute_path)
+                if subdir == '.':
+                    subdir = ''
 
-        filepaths = [os.path.join(directory, f) for f in files]
-        stats = await asyncio.gather(*[stat_file(fp) for fp in filepaths])
+                for idx in range(0, len(files), batch_size):
+                    items = []
+                    for filename in files[idx:idx + batch_size]:
+                        if stop_event.is_set():
+                            return
+                        filepath = os.path.join(directory, filename)
+                        try:
+                            stat = os.stat(filepath)
+                        except OSError:
+                            logger.debug("could not stat file: %r", filepath)
+                            continue
+                        items.append(SharedItem(
+                            shared_directory, subdir, filename, stat.st_mtime, stat.st_size
+                        ))
+                    if items and not _put_from_thread(items):
+                        return
+        except BaseException as exc:
+            _put_from_thread(exc)
+        finally:
+            _put_from_thread(None)
 
-        for filename, stat in zip(files, stats):
-            if stat is not None:
-                shared_items.add(
-                    SharedItem(shared_directory, subdir, filename, stat.st_mtime, stat.st_size)
-                )
+    producer_task = asyncio.create_task(asyncio.to_thread(_walk_in_thread))
+    try:
+        while True:
+            msg = await queue.get()
+            if msg is None:
+                break
+            if isinstance(msg, BaseException):
+                raise msg
 
+            yield msg
+    finally:
+        stop_event.set()
+        await producer_task
+
+
+async def scan_directory(
+        shared_directory: SharedDirectory,
+        children: Optional[list[SharedDirectory]] = None,
+        stat_concurrency: int = SCAN_STAT_CONCURRENCY) -> set[SharedItem]:
+    """Scans the directory for items to share.
+
+    This compatibility helper materializes all batches into one set.
+    """
+    shared_items: set[SharedItem] = set()
+    async for batch in iter_scanned_item_batches(
+        shared_directory,
+        children=children,
+        stat_concurrency=stat_concurrency,
+    ):
+        shared_items.update(batch)
     return shared_items
 
 
@@ -115,7 +179,7 @@ def extract_attributes(filepath: str) -> ItemAttributes:
     """
     attributes = []
     try:
-        mutagen_file = mutagen.File(filepath)
+        mutagen_file = mutagen.File(filepath)  # type: ignore
         if not mutagen_file:
             return []
 
@@ -139,7 +203,7 @@ def extract_attributes(filepath: str) -> ItemAttributes:
                 (5, mutagen_file.info.bits_per_sample, ),
             ]
 
-    except mutagen.MutagenError as exc:
+    except mutagen.MutagenError as exc:  # type: ignore
         logger.warning(
             "failed retrieve audio file metadata. path=%r", filepath, exc_info=exc)
 
@@ -152,20 +216,24 @@ class SharesManager(BaseManager):
     def __init__(
             self, settings: Settings, event_bus: EventBus,
             network: Network, cache: Optional[SharesCache] = None,
-            executor_factory: Optional[ExecutorFactory] = None):
+            executor_factory: Optional[ExecutorFactory] = None,
+            database: "SQLiteDatabase | None" = None):
 
         self._settings: Settings = settings
         self._event_bus: EventBus = event_bus
         self._network: Network = network
         self._session: Optional[Session] = None
+        self._scan_lock = asyncio.Lock()
+        self._directory_scan_locks: dict[str, asyncio.Lock] = {}
 
         self.executor: Optional[Executor] = None
         self.executor_factory: Optional[ExecutorFactory] = executor_factory
 
-        prebake_dir: Path | None = None
-        if isinstance(cache, SharesShelveCache):
-            prebake_dir = Path(cache.data_directory)
-        self.index = MemoryShareIndex(settings, cache, prebake_dir=prebake_dir)
+        self.index: ShareIndex
+        if database is not None:
+            self.index = SQLiteShareIndex(database, settings)
+        else:
+            self.index = MemoryShareIndex(settings, cache)
 
         self.naming_strategies = [
             DefaultNamingStrategy(),
@@ -222,9 +290,14 @@ class SharesManager(BaseManager):
 
         return alias_string
 
+    def _validate_executor_compatibility(self):
+        """Validate that the executor is compatible with the current index backend."""
+        self.index.validate_executor_compatibility(self.executor, self.executor_factory)
+
     async def start(self):
         if self.executor_factory:
             self.executor = self.executor_factory()
+        self._validate_executor_compatibility()
 
     async def stop(self) -> list[asyncio.Task]:
         if self.executor:
@@ -234,13 +307,11 @@ class SharesManager(BaseManager):
         return []
 
     async def load_data(self):
-        if isinstance(self.index, MemoryShareIndex):
-            self.index.read_cache()
+        await self.index.load_data()
         await self.load_from_settings()
 
     async def store_data(self):
-        if isinstance(self.index, MemoryShareIndex):
-            self.index.write_cache()
+        await self.index.store_data()
 
     async def load_from_settings(self):
         """Loads the shared directories from the settings. Existing directories
@@ -278,8 +349,7 @@ class SharesManager(BaseManager):
             if abs_path not in settings_paths:
                 await self.remove_shared_directory(directory)
 
-        if isinstance(self.index, MemoryShareIndex):
-            self.index.rebuild_term_map()
+        await self.index.on_settings_loaded()
 
     def get_download_directory(self) -> str:
         """Gets the absolute path the to download directory configured from the
@@ -316,8 +386,9 @@ class SharesManager(BaseManager):
 
     async def find_shared_item_cache(
             self, remote_path: str, username: Optional[str] = None) -> Optional[SharedItem]:
-        """Equivelant to :meth:`get_shared_item_cache` but returns ``None`` if the
-        shared item is not found
+        """Equivalent to :meth:`get_shared_item` but does not check if the file exists on disk.
+
+        Returns ``None`` if the item was not found in the index cache or is locked for ``username``.
         """
         try:
             return await self.index.get_shared_item(remote_path, username=username)
@@ -326,8 +397,8 @@ class SharesManager(BaseManager):
 
     async def find_shared_item(
             self, remote_path: str, username: Optional[str] = None) -> Optional[SharedItem]:
-        """Equivelant to :meth:`get_shared_item` but returns ``None`` if the
-        shared item is not found
+        """Equivelant to :meth:`find_shared_item` but also checks if the file exists on disk.
+        Returns None if the file was not found or if the file is found but does not exist on disk.
         """
         try:
             return await self.get_shared_item(remote_path, username=username)
@@ -403,12 +474,8 @@ class SharesManager(BaseManager):
         if users is not None:
             shared_directory.users = users
 
-        # Emit event BEFORE yielding to index update, so transfers can be
-        # aborted immediately before other tasks (like downloads) get a chance
-        # to run due to us yielding
-        self._event_bus.emit_sync(SharedDirectoryChangeEvent(shared_directory))
-
         await self.index.update_shared_directory(shared_directory)
+        self._event_bus.emit_sync(SharedDirectoryChangeEvent(shared_directory))
 
         return shared_directory
 
@@ -445,14 +512,13 @@ class SharesManager(BaseManager):
         """
         shared_directory = await self.get_shared_directory(
             directory if isinstance(directory, str) else directory.absolute_path)
-        if directory is None:
+        if shared_directory is None:
             raise SharedDirectoryError(
                 "attempted to remove directory which was not added to the manager"
             )
 
-        self._event_bus.emit_sync(SharedDirectoryChangeEvent(shared_directory))
-
         await self.index.delete_shared_directory(shared_directory)
+        self._event_bus.emit_sync(SharedDirectoryChangeEvent(shared_directory))
 
         return shared_directory
 
@@ -471,46 +537,6 @@ class SharesManager(BaseManager):
                 f"did not find shared directory with path : {directory}")
         return shared_directory
 
-    async def _scan_directory_files_internal(
-        self, shared_directory: SharedDirectory
-    ) -> SharedDirectory | None:
-        """Internal method that scans files for a directory without persisting.
-
-        :param shared_directory: :class:`.SharedDirectory` instance to scan
-        :return: the shared_directory with updated items, or None if scan failed
-        """
-        if not await self.index.is_directory_shared(shared_directory.absolute_path):
-            logger.warning(
-                "attempted to scan directory which was not added to the index: %r",
-                shared_directory
-            )
-            return None
-
-        logger.info("scheduling scan for directory : %r", shared_directory)
-        children = await self._get_child_directories(shared_directory)
-        try:
-            shared_items: set[SharedItem] = await scan_directory(
-                shared_directory,
-                children=children
-            )
-        except Exception:
-            logger.exception("exception scanning directory : %r", shared_directory)
-            return None
-
-        logger.debug("scan found %d files for directory : %r", len(shared_items), shared_directory)
-
-        # Adds all new items to the directory items
-        shared_directory.items |= shared_items
-
-        # Remove all items from the cache that weren't in the returned items
-        # set. Because the `modified` parameter is part of the hash items
-        # with a changed `modified` parameter will also be removed meaning
-        # their attributes will be reset and these files attributes need
-        # to be rescanned
-        shared_directory.items -= (shared_directory.items ^ shared_items)
-
-        return shared_directory
-
     async def scan_directory_files(self, shared_directory: SharedDirectory):
         """Scans the files for the given ``shared_directory``
 
@@ -518,19 +544,79 @@ class SharesManager(BaseManager):
         :raise SharedDirectoryError: raised when the passed ``shared_directory``
             was not added to the manager
         """
+        lock = self._directory_scan_locks.setdefault(
+            shared_directory.absolute_path, asyncio.Lock()
+        )
+        async with lock:
+            await self._scan_directory_files(shared_directory)
+
+    async def _scan_directory_files(self, shared_directory: SharedDirectory):
         if not await self.index.is_directory_shared(shared_directory.absolute_path):
             raise SharedDirectoryError(
                 "attempted to scan directory which was not added to the index"
             )
 
-        result = await self._scan_directory_files_internal(shared_directory)
-        if result is not None:
-            # Persist the updated items to the index
-            await self.index.add_shared_directory(shared_directory)
+        logger.info("scheduling scan for directory : %r", shared_directory)
+        children = await self._get_child_directories(shared_directory)
 
-            if isinstance(self.index, MemoryShareIndex):
-                self.index.build_term_map(shared_directory)
-                self.index.cleanup_term_map()
+        await self.index.begin_directory_scan(shared_directory)
+        scanned_items_count = 0
+        try:
+            async for item_batch in iter_scanned_item_batches(
+                shared_directory,
+                children=children,
+                stat_concurrency=SCAN_STAT_CONCURRENCY,
+                batch_size=SCAN_FILE_BATCH_SIZE,
+            ):
+                scanned_items_count += len(item_batch)
+                await self.index.persist_scanned_items_batch(shared_directory, item_batch)
+
+                updated_items = await self._scan_items_file_attributes(item_batch)
+                if updated_items:
+                    await self.index.persist_attribute_updates_batch(updated_items)
+        except BaseException:
+            await self.index.abort_directory_scan(shared_directory)
+            raise
+        else:
+            await self.index.end_directory_scan(shared_directory)
+
+        logger.debug(
+            "scan found %d files for directory : %r",
+            scanned_items_count,
+            shared_directory,
+        )
+
+    async def _scan_items_file_attributes(
+        self,
+        items: list[SharedItem],
+    ) -> list[SharedItem]:
+        """Scans file attributes for the given item batch."""
+        loop = asyncio.get_running_loop()
+        items_to_scan = [item for item in items if item.attributes is None]
+        if not items_to_scan:
+            return []
+
+        futures: list[asyncio.Future] = []
+        for item in items_to_scan:
+            futures.append(
+                loop.run_in_executor(
+                    self.executor,
+                    partial(extract_attributes, item.get_absolute_path()),
+                )
+            )
+
+        await asyncio.gather(*futures, return_exceptions=True)
+
+        updated_items: list[SharedItem] = []
+        for item, future in zip(items_to_scan, futures):
+            try:
+                item.attributes = future.result()
+            except Exception:
+                logger.warning("exception fetching shared item attributes")
+            else:
+                updated_items.append(item)
+
+        return updated_items
 
     async def scan_directory_file_attributes(
         self, shared_directory: SharedDirectory
@@ -545,44 +631,7 @@ class SharesManager(BaseManager):
             the files need to be scanned
         :return: list of items that had their attributes updated
         """
-        loop = asyncio.get_running_loop()
-
-        # Track items being processed and their futures
-        items_to_scan: list[SharedItem] = []
-        futures: list[asyncio.Future] = []
-
-        for item in shared_directory.items:
-            if item.attributes is None:
-                items_to_scan.append(item)
-                future = loop.run_in_executor(
-                    self.executor,
-                    partial(extract_attributes, item.get_absolute_path())
-                )
-                future.add_done_callback(
-                    partial(self._extract_attributes_callback, item)
-                )
-                futures.append(future)
-
-        logger.debug(
-            "scheduled %d / %d items for attribute extracting for directory %s",
-            len(futures), len(shared_directory.items), shared_directory
-        )
-
-        start = time.perf_counter()
-
-        await asyncio.gather(*futures, return_exceptions=True)
-
-        logger.debug(
-            "scanned attributes for %d items in %f s", len(futures), time.perf_counter() - start)
-
-        # Return items that now have attributes
-        return [item for item in items_to_scan if item.attributes is not None]
-
-    def _extract_attributes_callback(self, item: SharedItem, future: asyncio.Future):
-        try:
-            item.attributes = future.result()
-        except Exception:
-            logger.warning("exception fetching shared item attributes")
+        return await self._scan_items_file_attributes(list(shared_directory.items))
 
     async def scan(self):
         """Scan the files and their attributes for all directories currently
@@ -591,25 +640,38 @@ class SharesManager(BaseManager):
         This method will emit a :class:`.ScanCompleteEvent` on the event bus
         and report the shares to the server
         """
+        async with self._scan_lock:
+            await self._scan()
+
+    async def _scan(self):
         start_time = time.perf_counter()
 
         visible, locked = await self.index.get_shared_directories()
         all_shared_dirs = visible + locked
 
-        files_tasks = [
-            self.scan_directory_files(shared_directory)
-            for shared_directory in all_shared_dirs
-        ]
-        await asyncio.gather(*files_tasks, return_exceptions=True)
+        await self.index.begin_scan()
+        try:
+            semaphore = asyncio.Semaphore(SCAN_DIRECTORIES_IN_FLIGHT)
 
-        # Scan attributes for all directories
-        attribute_results = await asyncio.gather(*[
-            self.scan_directory_file_attributes(shared_directory)
-            for shared_directory in all_shared_dirs
-        ])
+            async def _run_directory_scan(shared_directory: SharedDirectory):
+                async with semaphore:
+                    await self.scan_directory_files(shared_directory)
 
-        await self.index.update_item_attributes(
-            list(itertools.chain.from_iterable(attribute_results)))
+            tasks = [
+                asyncio.create_task(_run_directory_scan(shared_directory))
+                for shared_directory in all_shared_dirs
+            ]
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+            await self.index.finalize_scan([])
+        finally:
+            await self.index.end_scan()
 
         # Update prebaked listings for fast share replies
         await self.update_prebaked_listings()
@@ -666,10 +728,13 @@ class SharesManager(BaseManager):
         )
 
     async def get_shared_directories_for_user(
-            self, username: str) -> tuple[list[SharedDirectory], list[SharedDirectory]]:
+        self, username: str
+    ) -> tuple[list[SharedDirectory], list[SharedDirectory]]:
         return await self.index.get_shared_directories(username=username)
 
-    async def create_shares_reply(self, username: str) -> tuple[list[DirectoryData], list[DirectoryData]]:
+    async def create_shares_reply(
+        self, username: str
+    ) -> tuple[list[DirectoryData], list[DirectoryData]]:
         """Creates a complete list of the currently shared items as a reply to
         a :class:`.PeerSharesRequest` messages
 
@@ -710,22 +775,22 @@ class SharesManager(BaseManager):
 
         mode = DirectoryShareMode.FRIENDS if is_friend else DirectoryShareMode.EVERYONE
 
-        # Try prebaked listing, fall back to dynamic if not available
+        # Try prebaked listing, fall back to dynamic if not available.
+        # Streaming is bounded by timeouts to avoid hanging on stalled peers.
         try:
-            writer = connection._writer
-            if writer is None:
-                raise ValueError("connection has no writer")
-
             if connection.obfuscated:
                 # For obfuscated connections, load bytes and send through normal path
                 data = await self.index.get_prebaked_listing(mode)
                 await connection.send_message(data)
             else:
-                # For non-obfuscated connections, stream directly
-                await self.index.copy_prebaked_listing_to(writer, mode)
-                await writer.drain()
-
-        except Exception:
+                # Hold the same lock as ordinary sends for the whole frame,
+                # not just an individual chunk or drain.
+                async with connection._send_lock:
+                    writer = connection._writer
+                    if writer is None:
+                        raise ValueError("connection has no writer")
+                    await self.index.copy_prebaked_listing_to(writer, mode)
+        except FileNotFoundError:
             logger.debug("prebaked listing not available, generating dynamically")
             visible, locked = await self.create_shares_reply(username)
             await connection.send_message(
@@ -734,6 +799,28 @@ class SharesManager(BaseManager):
                     locked_directories=locked
                 )
             )
+        except asyncio.CancelledError:
+            from ..network.connection import CloseReason
+
+            await connection.disconnect(CloseReason.REQUESTED)
+            raise
+        except asyncio.TimeoutError:
+            from ..network.connection import CloseReason
+
+            await connection.disconnect(CloseReason.TIMEOUT)
+            return
+        except OSError:
+            from ..network.connection import CloseReason
+
+            await connection.disconnect(CloseReason.WRITE_ERROR)
+            return
+        except Exception:
+            from ..network.connection import CloseReason
+
+            # A partial frame may already be on the wire. Sending a fallback
+            # response here would corrupt the connection's framing.
+            logger.exception("failed to stream shares reply")
+            await connection.disconnect(CloseReason.WRITE_ERROR)
 
     async def create_directory_reply(self, remote_directory: str) -> list[DirectoryData]:
         """Lists directory data as a response to a directory request. This will
@@ -782,42 +869,59 @@ class SharesManager(BaseManager):
         This should be called after a scan completes to update the cached
         serialized listings used for fast share reply generation.
         """
-        # Generate listing for non-privileged users (EVERYONE mode)
-        # Pass None as username - this means FRIENDS dirs will be locked
-        everyone_visible, everyone_locked = await self.index.get_shared_items_for_user(
-            username=None
-        )
-        await self.index.save_prebaked_listing(
+        # Generate listing for non-friend, non-privileged users (EVERYONE mode).
+        # Using a synthetic username avoids the username=None semantics where
+        # FRIENDS/USERS directories would appear unlocked.
+        base_non_friend = "__aioslsk_nonfriend_prebake__"
+        everyone_username = base_non_friend
+        suffix = 0
+        while (
+            everyone_username in self._settings.users.friends
+            or await self.index.is_privileged_user(everyone_username)
+        ):
+            suffix += 1
+            everyone_username = f"{base_non_friend}{suffix}"
+
+        everyone_visible_count, everyone_locked_count = await self.index.rebuild_prebaked_listing(
             DirectoryShareMode.EVERYONE,
-            visible=everyone_visible,
-            locked=everyone_locked,
+            username=everyone_username,
         )
         logger.debug(
             "updated prebaked listing for EVERYONE: %d visible, %d locked dirs",
-            len(everyone_visible), len(everyone_locked)
+            everyone_visible_count, everyone_locked_count,
         )
 
-        # Generate listing for friends (FRIENDS mode)
-        # Find any friend to use as reference, or use a synthetic marker
+        # Generate listing for friends (FRIENDS mode) using a non-privileged
+        # friend as reference. Privileged friends need dynamic generation.
         friends = self._settings.users.friends
-        if friends:
-            # Use an arbitrary friend - they all see the same FRIENDS directories
-            friend_username = next(iter(friends))
-            friends_visible, friends_locked = await self.index.get_shared_items_for_user(
-                username=friend_username
+        if not friends:
+            logger.debug(
+                "skipping FRIENDS prebake listing update: no friends configured"
+            )
+            return
+
+        friend_username = None
+        for username in friends:
+            if not await self.index.is_privileged_user(username):
+                friend_username = username
+                break
+
+        if friend_username is None:
+            # No suitable non-privileged friend configured:
+            # FRIENDS listing is unused (no friends) or privileged users
+            # will be handled dynamically.
+            friends_visible_count, friends_locked_count = await self.index.rebuild_prebaked_listing(
+                DirectoryShareMode.FRIENDS,
+                username=everyone_username,
             )
         else:
-            # No friends configured - FRIENDS listing is same as EVERYONE
-            friends_visible, friends_locked = everyone_visible, everyone_locked
-
-        await self.index.save_prebaked_listing(
-            DirectoryShareMode.FRIENDS,
-            visible=friends_visible,
-            locked=friends_locked,
-        )
+            friends_visible_count, friends_locked_count = await self.index.rebuild_prebaked_listing(
+                DirectoryShareMode.FRIENDS,
+                username=friend_username,
+            )
         logger.debug(
             "updated prebaked listing for FRIENDS: %d visible, %d locked dirs",
-            len(friends_visible), len(friends_locked)
+            friends_visible_count, friends_locked_count,
         )
 
     async def report_shares(self):

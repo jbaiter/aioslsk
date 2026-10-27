@@ -1894,6 +1894,9 @@ class PeerSharesReply(PeerMessage):
         def serialize(self, compress: bool = True) -> bytes:
             return super(type(self), self).serialize(compress)
 
+        def serialize_into(self, buffer: bytearray, compress: bool = True) -> None:
+            super(type(self), self).serialize_into(buffer, compress=compress)
+
         @classmethod
         def deserialize(cls, pos: int, message: bytes, decompress: bool = True):
             return super(cls, cls).deserialize(pos, message, decompress)
@@ -1926,6 +1929,9 @@ class PeerSearchReply(PeerMessage):
 
         def serialize(self, compress: bool = True) -> bytes:
             return super(type(self), self).serialize(compress)
+
+        def serialize_into(self, buffer: bytearray, compress: bool = True) -> None:
+            super(type(self), self).serialize_into(buffer, compress=compress)
 
         @classmethod
         def deserialize(cls, pos: int,  message: bytes, decompress: bool = True):
@@ -1993,6 +1999,9 @@ class PeerDirectoryContentsReply(PeerMessage):
 
         def serialize(self, compress: bool = True) -> bytes:
             return super(type(self), self).serialize(compress)
+
+        def serialize_into(self, buffer: bytearray, compress: bool = True) -> None:
+            super(type(self), self).serialize_into(buffer, compress=compress)
 
         @classmethod
         def deserialize(cls, pos: int, message: bytes, decompress: bool = True):

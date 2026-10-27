@@ -3,11 +3,13 @@ from async_timeout import timeout as atimeout
 from collections.abc import AsyncGenerator
 import os
 from pathlib import Path
+import pytest
 import pytest_asyncio
 from pytest import FixtureRequest
 import shutil
 
 from aioslsk.client import SoulSeekClient
+from aioslsk.database.sqlite import SQLiteDatabase
 from aioslsk.events import SessionInitializedEvent
 from aioslsk.shares.model import DirectoryShareMode
 from aioslsk.settings import (
@@ -31,9 +33,10 @@ FILE_SHARES = os.path.join(
     os.path.dirname(os.path.realpath(__file__)), '..', 'unit', 'resources', 'shared')
 
 
-def create_client(
+async def create_client(
         tmp_path: Path, username: str, port: int,
-        server_port: int = DEFAULT_SERVER_PORT, password: str = DEFAULT_PASSWORD) -> SoulSeekClient:
+        server_port: int = DEFAULT_SERVER_PORT, password: str = DEFAULT_PASSWORD,
+        use_sqlite: bool = False) -> SoulSeekClient:
     """Creates a new client object
 
     :param tmp_path: Path in which downloads and shared items are stored
@@ -41,6 +44,7 @@ def create_client(
     :param port: Listening port
     :param server_port: Server port to connect to
     :param password: Password of the user to login with
+    :param use_sqlite: Whether to use SQLite database for shares index
     """
     download_dir = tmp_path / username / 'downloads'
     download_dir.mkdir(parents=True, exist_ok=True)
@@ -80,16 +84,24 @@ def create_client(
         )
     )
 
-    return SoulSeekClient(settings)
+    database = None
+    if use_sqlite:
+        db_path = str(tmp_path / username / 'shares.db')
+        database = SQLiteDatabase(db_path)
+        await database.connect()
+
+    return SoulSeekClient(settings, database=database)
 
 
-def create_clients(tmp_path: Path, amount: int) -> list[SoulSeekClient]:
+async def create_clients(
+        tmp_path: Path, amount: int, use_sqlite: bool = False
+) -> list[SoulSeekClient]:
     clients: list[SoulSeekClient] = []
 
     for idx in range(amount):
         username = 'user' + str(idx).zfill(3)
         port = 40000 + (idx * 10)
-        client = create_client(tmp_path, username, port)
+        client = await create_client(tmp_path, username, port, use_sqlite=use_sqlite)
         clients.append(client)
 
     return clients
@@ -138,9 +150,16 @@ async def mock_server(request: FixtureRequest) -> AsyncGenerator[MockServer, Non
     await server.disconnect()
 
 
+@pytest.fixture(params=["memory", "sqlite"])
+def shares_backend(request) -> str:
+    """Parametrizes e2e tests to run against both memory and sqlite share backends."""
+    return request.param
+
+
 @pytest_asyncio.fixture
-async def client_1(tmp_path: Path) -> AsyncGenerator[SoulSeekClient, None]:
-    client = create_client(tmp_path, 'user0', 40000)
+async def client_1(tmp_path: Path, shares_backend: str) -> AsyncGenerator[SoulSeekClient, None]:
+    use_sqlite = shares_backend == "sqlite"
+    client = await create_client(tmp_path, 'user0', 40000, use_sqlite=use_sqlite)
 
     try:
         await client_start_and_scan(client)
@@ -151,8 +170,9 @@ async def client_1(tmp_path: Path) -> AsyncGenerator[SoulSeekClient, None]:
 
 
 @pytest_asyncio.fixture
-async def client_2(tmp_path: Path) -> AsyncGenerator[SoulSeekClient, None]:
-    client = create_client(tmp_path, 'user1', 41000)
+async def client_2(tmp_path: Path, shares_backend: str) -> AsyncGenerator[SoulSeekClient, None]:
+    use_sqlite = shares_backend == "sqlite"
+    client = await create_client(tmp_path, 'user1', 41000, use_sqlite=use_sqlite)
 
     try:
         await client_start_and_scan(client)
@@ -163,8 +183,9 @@ async def client_2(tmp_path: Path) -> AsyncGenerator[SoulSeekClient, None]:
 
 
 @pytest_asyncio.fixture
-async def clients(tmp_path: Path, request) -> AsyncGenerator[list[SoulSeekClient], None]:
-    client_list = create_clients(tmp_path, amount=request.param)
+async def clients(tmp_path: Path, request, shares_backend: str) -> AsyncGenerator[list[SoulSeekClient], None]:
+    use_sqlite = shares_backend == "sqlite"
+    client_list = await create_clients(tmp_path, amount=request.param, use_sqlite=use_sqlite)
 
     stop_tasks = [client.stop() for client in client_list]
 

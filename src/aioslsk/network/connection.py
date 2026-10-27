@@ -201,6 +201,7 @@ class DataConnection(Connection, abc.ABC):
         self._writer: Optional[asyncio.StreamWriter] = None
         self._reader_task: Optional[asyncio.Task] = None
 
+        self._send_lock = asyncio.Lock()
         self._queued_messages: list[asyncio.Task] = []
         self._read_timeout_object: Optional[Timeout] = None
 
@@ -448,25 +449,30 @@ class DataConnection(Connection, abc.ABC):
         ]
 
     async def _send(self, data: bytes, timeout: Optional[float] = None):
-        if not self._writer:
-            raise ConnectionWriteError(
-                f"{self.hostname}:{self.port} : cannot send data, connection is not open")
+        async with self._send_lock:
+            if not self._writer:
+                raise ConnectionWriteError(
+                    f"{self.hostname}:{self.port} : cannot send data, connection is not open")
 
-        try:
-            self._writer.write(data)
-            if timeout:
-                async with atimeout(timeout):
+            try:
+                self._writer.write(data)
+                if timeout:
+                    async with atimeout(timeout):
+                        await self._writer.drain()
+                else:
                     await self._writer.drain()
-            else:
-                await self._writer.drain()
 
-        except asyncio.TimeoutError as exc:
-            await self.disconnect(CloseReason.TIMEOUT)
-            raise ConnectionWriteError(f"{self.hostname}:{self.port} : write timeout") from exc
+            except asyncio.TimeoutError as exc:
+                await self.disconnect(CloseReason.TIMEOUT)
+                raise ConnectionWriteError(f"{self.hostname}:{self.port} : write timeout") from exc
 
-        except Exception as exc:
-            await self.disconnect(CloseReason.WRITE_ERROR)
-            raise ConnectionWriteError(f"{self.hostname}:{self.port} : exception during writing") from exc
+            except asyncio.CancelledError:
+                await self.disconnect(CloseReason.REQUESTED)
+                raise
+
+            except Exception as exc:
+                await self.disconnect(CloseReason.WRITE_ERROR)
+                raise ConnectionWriteError(f"{self.hostname}:{self.port} : exception during writing") from exc
 
     async def send_message(self, message: Union[bytes, MessageDataclass]):
         """Sends a message or a set of bytes over the connection. In case an

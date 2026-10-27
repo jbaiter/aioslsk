@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS directories (
 CREATE TABLE IF NOT EXISTS directory_users (
     directory_id INTEGER NOT NULL,
     username TEXT NOT NULL,
+
     PRIMARY KEY (directory_id, username),
     FOREIGN KEY (directory_id) REFERENCES directories (id) ON DELETE CASCADE
 );
@@ -33,14 +34,19 @@ CREATE TABLE IF NOT EXISTS files (
     directory_id INTEGER NOT NULL,
     subdir TEXT NOT NULL,
     filename TEXT NOT NULL,
-    remote_path TEXT GENERATED ALWAYS AS (subdir || '\' || filename) VIRTUAL,
-    -- SQLite FTS5 doesn't support prefix wildcards, so we store a reversed version
-    -- of the remote path to allow suffix wildcard searches for things like file extensions
-    fts_path TEXT GENERATED ALWAYS AS (REVERSE(remote_path)) VIRTUAL,
     mtime REAL NOT NULL,
     size_bytes INTEGER NOT NULL,
     -- Encoded as `<int>:<value>` pairs separated by pipes
     attributes TEXT,
+
+    -- protocol view of the path with windows-style path separators, i.e. `sub\dir\filename`
+    remote_path TEXT GENERATED ALWAYS AS (subdir || '\' || filename) VIRTUAL,
+    -- local view of the path with unix-style path separators, i.e. `sub/dir/filename`
+    local_path TEXT GENERATED ALWAYS AS (REPLACE(remote_path, '\', '/')) VIRTUAL,
+    -- SQLite FTS5 doesn't support prefix wildcards, so we store a reversed version
+    -- of the remote path to allow suffix wildcard searches for things like file extensions
+    fts_path TEXT GENERATED ALWAYS AS (REVERSE(remote_path)) VIRTUAL,
+
     FOREIGN KEY (directory_id) REFERENCES directories (id) ON DELETE CASCADE,
     UNIQUE (directory_id, subdir, filename)
 );

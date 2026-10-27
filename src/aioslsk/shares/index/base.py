@@ -1,17 +1,15 @@
+import asyncio
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from concurrent.futures import Executor
+from typing import BinaryIO, Callable
 
-if TYPE_CHECKING:
-    import asyncio
-    from concurrent.futures import Executor
-    from typing import BinaryIO, Callable
-
-    from ..model import SharedDirectory, SharedItem, DirectoryShareMode
-    from ...protocol.messages import DirectoryData
-    from ...search.model import SearchQuery
+from ..model import SharedDirectory, SharedItem, DirectoryShareMode
+from ...protocol.messages import DirectoryData
+from ...search.model import SearchQuery
 
 
 STREAM_WRITE_TIMEOUT_S = 10.0
+
 
 class ShareIndex(ABC):
     """
@@ -41,7 +39,8 @@ class ShareIndex(ABC):
         """
         Checks if the directory is a known shared directory.
 
-        :param directory: absolute path of the directory to check
+        :param directory: absolute path of the directory to check, with native
+                          path separators (/ on *nix, \\ on Windows)
         :return: whether the directory is shared or not
         """
         ...
@@ -55,7 +54,8 @@ class ShareIndex(ABC):
         i.e. the intent of this method is to only retrieve the metadata of the shared
         directory, not its contents.
 
-        :param directory: absolute path of the shared directory
+        :param directory: absolute path of the shared directory, with native
+                          path separators (/ on *nix, \\ on Windows)
         :return: the corresponding :class:`.SharedDirectory` instance or ``None``
         """
         ...
@@ -214,6 +214,11 @@ class ShareIndex(ABC):
         ...
 
     @abstractmethod
+    async def invalidate_prebaked_listings(self) -> None:
+        """Discard cached listings after changes to files or sharing rules."""
+        ...
+
+    @abstractmethod
     async def save_prebaked_listing(
         self,
         mode: DirectoryShareMode,
@@ -359,6 +364,10 @@ class ShareIndex(ABC):
     async def end_directory_scan(self, shared_directory: SharedDirectory) -> None:
         """Finalize backend-specific state for one scanned shared directory."""
         await self.persist_scanned_directory(shared_directory)
+
+    async def abort_directory_scan(self, shared_directory: SharedDirectory) -> None:
+        """Discard scan bookkeeping without purging previously indexed files."""
+        return None
 
     async def persist_scanned_directory(self, shared_directory: SharedDirectory) -> None:
         """Persist results for one scanned shared directory."""

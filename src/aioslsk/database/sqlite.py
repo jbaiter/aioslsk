@@ -37,6 +37,7 @@ class SQLiteDatabase:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._transaction_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Establishes a connection to the SQLite database and runs migrations if needed."""
@@ -67,23 +68,32 @@ class SQLiteDatabase:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Async context manager for SQLite transactions."""
-        try:
-            yield self.connection
-            await self.connection.commit()
-        except BaseException:
-            await self.connection.rollback()
-            raise
+        """Own the connection until commit or rollback, including cancellation.
+
+        Use the yielded connection for statements inside the transaction.
+        aiosqlite serializes statements, not whole transactions.
+        """
+        async with self._transaction_lock:
+            conn = self.connection
+            try:
+                await conn.execute("BEGIN")
+                yield conn
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
 
     async def execute(
         self, sql: str, parameters: dict | tuple | None = None
     ) -> aiosqlite.Cursor:
-        return await self.connection.execute(sql, parameters)
+        async with self._transaction_lock:
+            return await self.connection.execute(sql, parameters)
 
     async def executemany(
         self, sql: str, param_seq: list[dict] | list[tuple]
     ) -> aiosqlite.Cursor:
-        return await self.connection.executemany(sql, param_seq)
+        async with self._transaction_lock:
+            return await self.connection.executemany(sql, param_seq)
 
     async def _run_migrations(self) -> None:
         async with self.transaction() as conn:
@@ -132,7 +142,11 @@ class SQLiteDatabase:
         """Ensure SQLite has required features (JSON1 + FTS5)."""
         conn = self.connection
         try:
-            cursor = await conn.execute("SELECT json('[]') AS ok;")
+            cursor = await conn.execute(
+                """--sql
+                SELECT json_object('test', json_group_array('test')) AS result;
+                """
+            )
             row = await cursor.fetchone()
             if row is None:
                 raise RuntimeError("SQLite JSON1 check failed")
